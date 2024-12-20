@@ -28,6 +28,7 @@ typedef struct {
 } Client;
 
 typedef struct {
+    int priority; // Priorité du message
     int action; // 0=deposit, 1=withdraw, 2=transfer, 3=check balance
     int source_client_id;
     int source_account_id;
@@ -52,7 +53,7 @@ sem_t queue_sem;
 
 
 void handle_sigint(int sig) {
-    printf("\nSIGINT reçu. Fermeture propre en cours...\n");
+    printf("\nSIGINT reçu. On remballe tout c'est la fin de chantier \n");
     stop_program = 1; // Définit le drapeau pour arrêter les threads
 }
 
@@ -86,6 +87,22 @@ void add_account(int client_id, int account_id, double initial_balance) {
     }
     sem_post(&bank.bank_semaphore);
 }
+
+int get_priority_for_action(int action) {
+    switch (action) {
+        case 0: // Deposit
+            return 2;
+        case 1: // Withdraw
+            return 1;
+        case 2: // Transfer
+            return 0;
+        case 3: // Check balance
+            return 3;
+        default:
+            return 4; // Priorité la plus basse pour les actions non définies
+    }
+}
+
 
 void enqueue_message(Message msg) {
     pthread_mutex_lock(&queue_mutex);
@@ -134,11 +151,46 @@ void process_message(Message msg) {
                 }
             }
             break;
+        case 2: // Transfer
+            if (msg.source_client_id != msg.target_client_id || msg.source_account_id != msg.target_account_id) {
+                for (int i = 0; i < bank.num_clients; i++) {
+                    if (bank.clients[i].client_id == msg.source_client_id) {
+                        for (int j = 0; j < bank.clients[i].num_accounts; j++) {
+                            if (bank.clients[i].accounts[j].account_id == msg.source_account_id && bank.clients[i].accounts[j].balance >= msg.amount) {
+                                bank.clients[i].accounts[j].balance -= msg.amount;
+                                for (int k = 0; k < bank.num_clients; k++) {
+                                    if (bank.clients[k].client_id == msg.target_client_id) {
+                                        for (int l = 0; l < bank.clients[k].num_accounts; l++) {
+                                            if (bank.clients[k].accounts[l].account_id == msg.target_account_id) {
+                                                bank.clients[k].accounts[l].balance += msg.amount;
+                                                printf("Client %d: Transferred %.2f from account %d to client %d account %d\n", msg.source_client_id, msg.amount, msg.source_account_id, msg.target_client_id, msg.target_account_id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            break;
+        case 3: // Check balance
+            for (int i = 0; i < bank.num_clients; i++) {
+                if (bank.clients[i].client_id == msg.source_client_id) {
+                    for (int j = 0; j < bank.clients[i].num_accounts; j++) {
+                        if (bank.clients[i].accounts[j].account_id == msg.source_account_id) {
+                            printf("Client %d: Balance for account %d is %.2f\n", msg.source_client_id, msg.source_account_id, bank.clients[i].accounts[j].balance);
+                        }
+                    }
+                }
+            }
+            break;
         default:
             printf("Unknown action %d\n", msg.action);
     }
     sem_post(&bank.bank_semaphore);
 }
+
 
 void *worker_thread(void *arg) {
     while (!stop_program) {
@@ -156,13 +208,12 @@ unsigned int thread_safe_rand(unsigned int *seed) {
 
 void *client_thread(void *arg) {
     int client_id = *((int *)arg);
-
-    // Initialiser une graine spécifique pour chaque thread
     unsigned int thread_seed = time(NULL) + client_id;
 
-    for (int i = 0; i < 5 && !stop_program; i++) {
+    while (!stop_program) {  // Remplacer "for" par "while"
         Message msg;
-        msg.action = thread_safe_rand(&thread_seed) % 2; // 0 = deposit, 1 = withdraw
+        msg.action = thread_safe_rand(&thread_seed) % 4; // Génère un nombre entre 0 et 3 pour les actions
+        msg.priority = get_priority_for_action(msg.action);
         msg.source_client_id = client_id;
         msg.source_account_id = (thread_safe_rand(&thread_seed) % MAX_ACCOUNTS) + 1;
         msg.amount = (thread_safe_rand(&thread_seed) % 1000) + 1; // Montant entre 1 et 1000
@@ -170,10 +221,11 @@ void *client_thread(void *arg) {
         msg.target_account_id = -1;
 
         enqueue_message(msg);
-        sleep(1);
+        sleep(1); // Délai pour simuler le temps de traitement et réduire la charge du CPU
     }
     return NULL;
 }
+
 
 
 int main() {
@@ -232,3 +284,4 @@ int main() {
     }
     return 0;
 }
+
